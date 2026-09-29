@@ -22,6 +22,7 @@
     │   ├── frame_grabber.py               ← OpenCV/V4L2 取帧
     │   ├── camera_node.py                 ← 发布 /c70/image_raw
     │   ├── ball_detector.py               ← 不依赖 ROS 的球检测算法
+    │   ├── ball_order_tracker.py          ← 三色连续稳定顺序
     │   └── vision_node.py                 ← ROS 订阅/检测/发布
     └── test/test_ball_detector.py         ← 合成图离线算法测试
 ```
@@ -43,6 +44,20 @@ camera_node ──sensor_msgs/Image──▶ /c70/image_raw
 - `robot_interfaces` 用 CMake 构建，因为 ROS2 自定义接口由 `rosidl` 生成，不由 Python 包生成。
 - `ball_detector.py` 只做图像算法，输入 BGR numpy 图，输出最佳球、mask、候选集合，便于离线测试。
 - `vision_node.py` 负责 ROS 消息、参数、时间戳、话题和节点生命周期。
+
+## 2.1 三色顺序话题
+
+单体 mode2 会同时检测红/绿/蓝。某颜色连续出现 4 帧后，按首次稳定出现的先后加入顺序，颜色编码为 `1=红、2=绿、3=蓝`。
+
+```text
+/vision/ball_order  robot_interfaces/msg/BallOrder
+  Header header
+  uint8[] order
+
+/vision/reset       std_msgs/msg/Empty
+```
+
+`/vision/reset` 用于上层开始一次新的球识别流程：收到后清空 `order`、各颜色稳定计数和目标坐标平滑状态。`/vision/ball_order` 在球检测流程中每帧发布当前顺序；真正的目标索引和是否后退由未来 `mission_node` 决定。
 
 ## 3. TargetPos 消息
 
@@ -119,9 +134,18 @@ source ~/ros2_ws/install/setup.bash
 ros2 topic hz /vision/target_pos
 ros2 topic echo /vision/target_pos
 ros2 topic hz /vision/debug_image
+ros2 topic echo /vision/ball_order
 ```
 
 预期：图像收到一帧处理一帧（接近 camera 的 30Hz）；没球时持续 `valid: false`；放入红球后 `valid: true` 且 x/y 随位置变化。可用 `rqt_image_view /vision/debug_image` 查看画框图。
+
+重置一次识别流程：
+
+```bash
+ros2 topic pub --once /vision/reset std_msgs/msg/Empty "{}"
+```
+
+测试顺序时，让红/绿/蓝球依次进入画面并保持稳定；连续 4 帧后，`/vision/ball_order` 应依次出现 `[1]`、`[1, 2]`、`[1, 2, 3]`。
 
 ### 5.3 参数检查/运行时调色
 
@@ -156,5 +180,5 @@ ros2 param set /vision_node active_id 2
 ### 7.1 与单体的差异（有意）
 - 选择准则：单体只按 `area*circularity*circle_fill` 取最大；本实现额外加 `center_score_weight` 中心偏好（访谈决定）。
 - 发布频率：单体 `position_hz=25Hz` 节流；本实现每帧（~30Hz）发布（访谈决定）。
-- 多帧顺序：单体有 `ball_order_stable_frames` + 三色到达顺序；本实现后置，暂未移植。
+- 多帧顺序：已移植 `ball_order_stable_frames=4`、三色到达顺序、去重和 reset；目标索引/后退决策留给未来 `mission_node`。
 - 相同部分：HSV 阈值、5×5 形态学、面积/半径/圆度/圆填充率、质量分、EMA(0.35) 平滑、无效坐标、`ball_order_min_x/max_x` 越界过滤均与单体一致。

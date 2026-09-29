@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 
 from robot_vision.ball_detector import BallDetector
+from robot_vision.ball_order_tracker import BallOrderTracker
 
 
 def detector():
@@ -57,3 +58,23 @@ def test_selects_best_candidate():
     assert result is not None
     assert abs(result.x - 320) <= 2
     assert abs(result.y - 240) <= 2
+
+
+def test_ball_order_requires_four_stable_frames_and_deduplicates():
+    tracker = BallOrderTracker(stable_frames=4)
+    assert tracker.update({"red"}) == []
+    assert tracker.update({"red"}) == []
+    assert tracker.update({"red"}) == []
+    assert tracker.update({"red"}) == [1]
+    assert tracker.update({"red", "green"}) == [1]
+    assert tracker.update({"red", "green"}) == [1]
+    assert tracker.update({"red", "green"}) == [1]
+    assert tracker.update({"red", "green"}) == [1, 2]
+    assert tracker.update(set()) == [1, 2]
+
+
+def test_ball_order_reset_starts_a_new_sequence():
+    tracker = BallOrderTracker(stable_frames=1)
+    assert tracker.update({"blue"}) == [3]
+    tracker.reset()
+    assert tracker.update({"green"}) == [2]

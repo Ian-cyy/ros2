@@ -9,10 +9,12 @@ from cv_bridge import CvBridge
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from robot_interfaces.msg import TargetPos
+from robot_interfaces.msg import BallOrder, TargetPos
 from sensor_msgs.msg import Image
+from std_msgs.msg import Empty
 
 from .ball_detector import BallDetector, BallDetection
+from .ball_order_tracker import BallOrderTracker
 
 
 class VisionNode(Node):
@@ -23,19 +25,25 @@ class VisionNode(Node):
         self._declare_parameters()
         self.bridge = CvBridge()
         self.target_pub = self.create_publisher(TargetPos, self.target_topic, 10)
+        self.order_pub = self.create_publisher(BallOrder, self.order_topic, 10)
         self.debug_pub = self.create_publisher(
             Image, self.debug_topic, qos_profile_sensor_data
         )
         self.detector = BallDetector(self._detector_params())
+        self.order_tracker = BallOrderTracker(self.ball_order_stable_frames)
         self._smooth_x = None
         self._smooth_y = None
         self._subscription = self.create_subscription(
             Image, self.image_topic, self._on_image, qos_profile_sensor_data
         )
+        self._reset_subscription = self.create_subscription(
+            Empty, self.reset_topic, self._on_reset, 10
+        )
         self.add_on_set_parameters_callback(self._on_parameters)
         self.get_logger().info(
             f"vision ready: active_id={self.active_id} color={self.ball_color} "
-            f"input={self.image_topic} output={self.target_topic}"
+            f"input={self.image_topic} output={self.target_topic} "
+            f"order={self.order_topic} stable_frames={self.ball_order_stable_frames}"
         )
 
     def _declare_parameters(self):
@@ -53,6 +61,7 @@ class VisionNode(Node):
         # 球心 x 允许范围（对标单体 ball_order_min_x / ball_order_max_x）
         self.declare_parameter("ball_order_min_x", 20.0)
         self.declare_parameter("ball_order_max_x", 620.0)
+        self.declare_parameter("ball_order_stable_frames", 4)
         # ROS2 参数数组只能是一维基础类型，这里每 6 个数表示一个 HSV 区间：
         # low_h, low_s, low_v, high_h, high_s, high_v。
         self.declare_parameter(
@@ -63,6 +72,8 @@ class VisionNode(Node):
         self.declare_parameter("publish_debug_image", True)
         self.declare_parameter("image_topic", "/c70/image_raw")
         self.declare_parameter("target_topic", "/vision/target_pos")
+        self.declare_parameter("order_topic", "/vision/ball_order")
+        self.declare_parameter("reset_topic", "/vision/reset")
         self.declare_parameter("debug_topic", "/vision/debug_image")
         self._refresh_parameters()
 
@@ -78,6 +89,11 @@ class VisionNode(Node):
         self.image_topic = str(self.get_parameter("image_topic").value)
         self.target_topic = str(self.get_parameter("target_topic").value)
         self.debug_topic = str(self.get_parameter("debug_topic").value)
+        self.order_topic = str(self.get_parameter("order_topic").value)
+        self.reset_topic = str(self.get_parameter("reset_topic").value)
+        self.ball_order_stable_frames = int(
+            self.get_parameter("ball_order_stable_frames").value
+        )
 
     def _detector_params(self) -> Dict[str, object]:
         def parse_ranges(name: str) -> List[Tuple[Tuple[int, int, int], Tuple[int, int, int]]]:
@@ -119,15 +135,31 @@ class VisionNode(Node):
                     return SetParametersResult(
                         successful=False, reason="alpha must be in (0, 1]"
                     )
+            if parameter.name == "ball_order_stable_frames":
+                if int(parameter.value) < 1:
+                    return SetParametersResult(
+                        successful=False, reason="stable frames must be >= 1"
+                    )
             if parameter.name == "active_id" and int(parameter.value) != self.active_id:
-                self._reset_smoothing()
+                self._reset_state()
         self._refresh_parameters()
         self.detector = BallDetector(self._detector_params())
+        self.order_tracker.stable_frames = self.ball_order_stable_frames
         return SetParametersResult(successful=True)
 
     def _reset_smoothing(self):
         self._smooth_x = None
         self._smooth_y = None
+
+    def _reset_state(self):
+        """清空一轮识别的全部状态。"""
+        self._reset_smoothing()
+        self.order_tracker.reset()
+
+    def _on_reset(self, _message):
+        """上层开始一次新的球识别流程时清空全部视觉状态。"""
+        self._reset_state()
+        self.get_logger().info("ball order and target smoothing reset")
 
     def _on_image(self, message: Image):
         """每帧处理：识别、平滑、发布 TargetPos 和可视化图。"""
@@ -139,11 +171,31 @@ class VisionNode(Node):
         detection = None
 
         if self.active_id == 1:
-            try:
-                detection, mask, _ = self.detector.detect(frame, self.ball_color)
-            except ValueError as error:
-                self.get_logger().error(str(error))
-                detection, mask = None, np.zeros(frame.shape[:2], dtype=np.uint8)
+            detections = {}
+            masks = {}
+            for color in BallOrderTracker.COLOR_CODES:
+                try:
+                    detections[color], masks[color], _ = self.detector.detect(
+                        frame, color
+                    )
+                except ValueError as error:
+                    self.get_logger().error(str(error))
+                    detections[color] = None
+                    masks[color] = np.zeros(frame.shape[:2], dtype=np.uint8)
+
+            visible_colors = {
+                color for color, item in detections.items() if item is not None
+            }
+            order_codes = self.order_tracker.update(visible_colors)
+            order_message = BallOrder()
+            order_message.header = message.header
+            order_message.order = order_codes
+            self.order_pub.publish(order_message)
+
+            detection = detections.get(self.ball_color)
+            mask = masks.get(
+                self.ball_color, np.zeros(frame.shape[:2], dtype=np.uint8)
+            )
             if detection is not None:
                 x, y = self._smooth(detection.x, detection.y)
                 valid = True
@@ -152,7 +204,7 @@ class VisionNode(Node):
                 self._reset_smoothing()
         else:
             mask = np.zeros(frame.shape[:2], dtype=np.uint8)
-            self._reset_smoothing()
+            self._reset_state()
 
         self._draw_status(debug, valid, x, y, mask)
         result = TargetPos()
@@ -187,7 +239,7 @@ class VisionNode(Node):
         cv2.putText(frame, status, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
 
     def destroy_node(self):
-        self._reset_smoothing()
+        self._reset_state()
         super().destroy_node()
 
 

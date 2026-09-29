@@ -12,10 +12,13 @@
     center_score_weight: 0.25
     ball_order_min_x: 20.0
     ball_order_max_x: 620.0
+    ball_order_stable_frames: 4
     red_hsv_ranges: [0, 70, 35, 12, 255, 255, 168, 70, 35, 180, 255, 255]
     green_hsv_ranges: [35, 45, 30, 90, 255, 255]
     blue_hsv_ranges: [92, 50, 30, 135, 255, 255]
     publish_debug_image: true
     image_topic: /c70/image_raw
     target_topic: /vision/target_pos
+    order_topic: /vision/ball_order
+    reset_topic: /vision/reset
     debug_topic: /vision/debug_image
