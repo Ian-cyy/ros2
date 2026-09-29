@@ -1,0 +1,21 @@
+/vision_node:
+  ros__parameters:
+    active_id: 1
+    ball_color: red
+    position_smoothing_alpha: 0.35
+    min_ball_area: 300.0
+    min_ball_radius: 8.0
+    max_ball_radius: 220.0
+    min_circularity: 0.60
+    min_circle_fill: 0.65
+    morphology_kernel_size: 5
+    center_score_weight: 0.25
+    ball_order_min_x: 20.0
+    ball_order_max_x: 620.0
+    red_hsv_ranges: [0, 70, 35, 12, 255, 255, 168, 70, 35, 180, 255, 255]
+    green_hsv_ranges: [35, 45, 30, 90, 255, 255]
+    blue_hsv_ranges: [92, 50, 30, 135, 255, 255]
+    publish_debug_image: true
+    image_topic: /c70/image_raw
+    target_topic: /vision/target_pos
+    debug_topic: /vision/debug_image

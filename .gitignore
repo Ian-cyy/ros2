@@ -1,0 +1,21 @@
+# ROS2/colcon generated output
+build/
+install/
+log/
+
+# Python cache and packaging output
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Local editor and system files
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Runtime/test artifacts
+/tmp/
+*.bag
+*.db3
